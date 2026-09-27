@@ -1,0 +1,43 @@
+{
+  "name": "pumpswap-trending-indexer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "infinity": "tsx src/pancakeswap_infinity_runner.ts all",
+    "infinity:pools": "tsx src/pancakeswap_infinity_runner.ts pools",
+    "infinity:prices": "tsx src/pancakeswap_infinity_runner.ts prices",
+    "uniswap:bsc": "tsx src/uniswap_v3_bsc_runner.ts",
+    "uniswap:v4:bsc": "tsx src/uniswap_v4_bsc_runner.ts",
+    "uniswap:v4:base": "tsx src/uniswap_v4_base_runner.ts",
+    "uniswap:v4:robinhood": "tsx src/uniswap_v4_robinhood_runner.ts",
+    "uniswap:v3:robinhood": "tsx src/uniswap_v3_robinhood_runner.ts",
+    "uniswap:v3:base": "tsx src/uniswap_v3_base_runner.ts",
+    "uniswap:v2:base": "tsx src/uniswap_v2_base_runner.ts",
+    "metadata:logos": "tsx src/token_logo_worker.ts",
+    "metadata:logos:once": "tsx src/token_logo_worker.ts --once",
+    "smoke": "tsx src/smoke.ts"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^1.7.2",
+    "@connectrpc/connect": "^1.3.0",
+    "@connectrpc/connect-node": "^1.3.0",
+    "@solana/web3.js": "^1.95.3",
+    "@supabase/supabase-js": "^2.47.10",
+    "@types/pg": "^8.23.1",
+    "bs58": "^6.0.0",
+    "dotenv": "^16.4.5",
+    "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.4",
+    "@types/ws": "^8.18.1",
+    "keccak": "^3.0.4",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.2",
+    "ws": "^8.21.3"
+  }
+}

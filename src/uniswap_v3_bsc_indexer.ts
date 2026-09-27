@@ -1,0 +1,80 @@
+import 'dotenv/config';
+import { appendFile } from 'node:fs/promises';
+import type { Pool as PgPool } from 'pg';
+import WebSocket from 'ws';
+import { nextWebsocketEndpoint, normalizeWebsocketEndpoints, type WebsocketEndpointInput } from './evm_ws_rotation.js';
+import { getReferencePrice } from './reference_prices.js';
+
+export const UNISWAP_V3_BSC_FACTORY = (process.env.UNISWAP_V3_BSC_FACTORY ?? '0xdb1d10011ad0ff90774d0c6bb92e5c5c8b4461f7').toLowerCase();
+const SWAP_TOPIC = '0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67';
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+const WBNB = (process.env.UNISWAP_V3_BSC_WBNB ?? '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c').toLowerCase();
+const USDT = (process.env.UNISWAP_V3_BSC_USDT ?? '0x55d398326f99059ff775485246999027b3197955').toLowerCase();
+const BNB_PRICE_URL = process.env.BNB_PRICE_URL ?? 'https://api.geckoterminal.com/api/v2/simple/networks/bsc/token_price/0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c';
+const SWAP_THRESHOLD = Number(process.env.UNISWAP_V3_BSC_SWAP_THRESHOLD ?? process.env.EVM_PROMOTION_SWAP_THRESHOLD ?? process.env.PROMOTION_SWAP_THRESHOLD ?? 100);
+const UNIQUE_WALLET_THRESHOLD = Number(process.env.UNISWAP_V3_BSC_MIN_UNIQUE_WALLETS ?? process.env.EVM_PROMOTION_MIN_UNIQUE_WALLETS ?? process.env.PROMOTION_MIN_UNIQUE_WALLETS ?? 20);
+const WINDOW_MS = Number(process.env.PROMOTION_WINDOW_MS ?? 15 * 60 * 1000);
+const FAILURE_FILE = process.env.UNISWAP_V3_BSC_FAILURE_FILE ?? 'uniswap-v3-bsc-failures.jsonl';
+const PRICE_FILE = process.env.UNISWAP_V3_BSC_PRICE_EVENT_FILE ?? 'uniswap-v3-bsc-price-events.jsonl';
+const DEFAULT_POOLS = ['0x47a90a2d92a8367a91efa1906bfc8c1e05bf10c4', '0x6fe9e9de56356f7edbfcbb29fab7cd69471a4869', '0x7862d9b4be2156b15d54f41ee4ede2d5b0b455e4', '0x4d170f8714367c44787ae98259ce8adb72240067'];
+const TIMEFRAMES = [{ name: '1m', milliseconds: 60_000 }, { name: '5m', milliseconds: 300_000 }, { name: '15m', milliseconds: 900_000 }, { name: '1h', milliseconds: 3_600_000 }, { name: '4h', milliseconds: 14_400_000 }, { name: '1d', milliseconds: 86_400_000 }] as const;
+
+type Pair = { address: string; token0: string; token1: string; symbol0: string; symbol1: string; decimals0: number; decimals1: number; fee: number; tickSpacing: number; block: number };
+type Activity = { pair: Pair; events: Array<{ wallet: string; timestamp: number }> };
+
+function word(data: string, index: number): bigint { const hex = data.startsWith('0x') ? data.slice(2) : data; if (!/^[0-9a-f]+$/i.test(hex) || hex.length < (index + 1) * 64) throw new Error(`Invalid ABI data for word ${index}`); return BigInt(`0x${hex.slice(index * 64, (index + 1) * 64)}`); }
+function addressWord(value: unknown): string { const raw = String(value ?? ''); return /^0x[0-9a-f]{64}$/i.test(raw) ? `0x${raw.slice(-40)}`.toLowerCase() : ZERO_ADDRESS; }
+function decodeUint(value: unknown): number { try { if (typeof value !== 'string' || !/^0x[0-9a-f]+$/i.test(value)) return 0; const number = Number(BigInt(value)); return Number.isFinite(number) ? number : 0; } catch { return 0; } }
+function decodeString(value: unknown): string { try { if (typeof value !== 'string' || value === '0x') return ''; const offset = Number(word(value, 0)); const length = Number(word(value, offset / 32)); if (!Number.isInteger(offset) || offset < 0 || offset % 32 !== 0 || !Number.isInteger(length) || length <= 0 || length > 256) return ''; return Buffer.from(value.slice(2 + (offset + 32) * 2, 2 + (offset + 32 + length) * 2), 'hex').toString('utf8').replace(/\0/g, ''); } catch { return ''; } }
+function signedWord(data: string, index: number, bits: number): number { const raw = word(data, index); const limit = 1n << BigInt(bits); return Number(raw >= limit / 2n ? raw - limit : raw); }
+function supported(pair: Pair): boolean { return pair.token0 === WBNB || pair.token1 === WBNB || pair.token0 === USDT || pair.token1 === USDT; }
+function usdPrice(pair: Pair, price: number, bnbUsd: number | null): number | null { if (pair.token1 === USDT) return price; if (pair.token0 === USDT) return 1 / price; if (pair.token1 === WBNB && bnbUsd) return price * bnbUsd; if (pair.token0 === WBNB && bnbUsd) return bnbUsd / price; return null; }
+async function failure(address: string, error: unknown): Promise<void> { try { await appendFile(FAILURE_FILE, `${JSON.stringify({ timestamp: new Date().toISOString(), poolAddress: address, error: String(error) })}\n`, 'utf8'); } catch { /* best effort */ } }
+
+async function resolvePair(call: (method: string, params: unknown[]) => Promise<any>, address: string, block: number): Promise<Pair | null> {
+  const factory = String(await call('eth_call', [{ to: address, data: '0xc45a0155' }, 'latest']));
+  if (addressWord(factory) !== UNISWAP_V3_BSC_FACTORY) return null;
+  const [token0Raw, token1Raw, feeRaw, spacingRaw] = await Promise.all([
+    call('eth_call', [{ to: address, data: '0x0dfe1681' }, 'latest']), call('eth_call', [{ to: address, data: '0xd21220a7' }, 'latest']),
+    call('eth_call', [{ to: address, data: '0xddca3f43' }, 'latest']), call('eth_call', [{ to: address, data: '0xd0c93a7c' }, 'latest']),
+  ]);
+  const token0 = addressWord(token0Raw); const token1 = addressWord(token1Raw);
+  if (token0 === ZERO_ADDRESS || token1 === ZERO_ADDRESS) return null;
+  const values = await Promise.all([token0, token1].flatMap((token) => [call('eth_call', [{ to: token, data: '0x95d89b41' }, 'latest']), call('eth_call', [{ to: token, data: '0x313ce567' }, 'latest'])]));
+  return { address, token0, token1, symbol0: decodeString(values[0]) || 'TOKEN0', decimals0: decodeUint(values[1]), symbol1: decodeString(values[2]) || 'TOKEN1', decimals1: decodeUint(values[3]), fee: decodeUint(feeRaw), tickSpacing: signedWord(String(spacingRaw), 0, 256), block };
+}
+
+export async function startUniswapV3BscIndexer(pgPool: PgPool, websocketUrl: WebsocketEndpointInput, priceFile = PRICE_FILE): Promise<void> {
+  const endpoints = normalizeWebsocketEndpoints(websocketUrl);
+  if (endpoints.length === 0) { console.warn('[uniswap-v3-bsc] UNISWAP_V3_BSC_WS_URL is not configured; indexing is disabled.'); return; }
+  const activities = new Map<string, Activity>(); const promoted = new Set<string>(); const knownPools = new Set<string>([...DEFAULT_POOLS, ...(process.env.UNISWAP_V3_BSC_POOL_ADDRESSES ?? '').split(',').map((address) => address.trim().toLowerCase()).filter(Boolean)]); const subscribedPools = new Set<string>(); let socket: WebSocket | undefined; let requestId = 1; let endpointIndex = 0; let reconnectDelay = 1000; let reconnectTimer: NodeJS.Timeout | undefined; let bnbUsd: number | null = null;
+  const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
+  const rpc = (method: string, params: unknown[]) => new Promise<any>((resolve, reject) => { if (!socket || socket.readyState !== WebSocket.OPEN) return reject(new Error('Uniswap BSC websocket is not open')); const id = requestId++; pending.set(id, { resolve, reject }); socket.send(JSON.stringify({ jsonrpc: '2.0', id, method, params })); setTimeout(() => { const request = pending.get(id); if (request) { pending.delete(id); request.reject(new Error(`RPC timeout for ${method}`)); } }, 15_000); });
+  let recordQueue = Promise.resolve(); const record = (event: Record<string, unknown>) => { recordQueue = recordQueue.then(() => appendFile(priceFile, `${JSON.stringify({ timestamp: new Date().toISOString(), ...event })}\n`, 'utf8')).catch((error) => console.error('[uniswap-v3-bsc-price] event log failed:', error)); return recordQueue; };
+  const processLog = async (log: any) => {
+    const address = String(log?.address ?? '').toLowerCase(); const topics = log?.topics; if (!/^0x[0-9a-f]{40}$/.test(address) || !Array.isArray(topics) || topics[0]?.toLowerCase() !== SWAP_TOPIC) return;
+    const wallet = addressWord(topics[1]); if (wallet === ZERO_ADDRESS) return;
+    let activity = activities.get(address); const block = Number.parseInt(log.blockNumber ?? '0x0', 16);
+    if (!activity) { const pair = await resolvePair(rpc, address, block); if (!pair || !supported(pair)) return; activity = { pair, events: [] }; activities.set(address, activity); console.log(`[uniswap-v3-bsc] Pool resolved ${address} ${pair.symbol0}/${pair.symbol1}`); }
+    const now = Date.now(); activity.events = activity.events.filter((event) => event.timestamp >= now - WINDOW_MS); activity.events.push({ wallet, timestamp: now }); const wallets = new Set(activity.events.map((event) => event.wallet)).size; const pair = activity.pair;
+    console.log(`[uniswap-v3-bsc][websocket] Tracked pool ${address} | swaps=${activity.events.length} | walletCount=${wallets}`);
+    const sqrtPriceX96 = word(log.data, 2); const liquidity = word(log.data, 3); const tick = signedWord(log.data, 4, 256); const price = (Number(sqrtPriceX96) / Number(2n ** 96n)) ** 2 * 10 ** (pair.decimals0 - pair.decimals1); if (!Number.isFinite(price) || price <= 0) return; const inverse = 1 / price; const usd = usdPrice(pair, price, bnbUsd);
+    await record({ type: 'price', poolType: 'uniswap_v3_bsc', poolAddress: address, pair: `${pair.symbol0}/${pair.symbol1}`, price, inversePrice: inverse, tokenPriceUsd: usd, sqrtPriceX96: sqrtPriceX96.toString(), liquidity: liquidity.toString(), tick, block, fee: pair.fee });
+    try {
+      const client = await pgPool.connect(); try { await client.query('BEGIN');
+        await client.query(`INSERT INTO bsc_uniswap_v3_prices (pool_address,price,inverse_price,base_token,quote_token,sqrt_price_x96,liquidity,tick,updated_block,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()) ON CONFLICT (pool_address) DO UPDATE SET price=EXCLUDED.price,inverse_price=EXCLUDED.inverse_price,sqrt_price_x96=EXCLUDED.sqrt_price_x96,liquidity=EXCLUDED.liquidity,tick=EXCLUDED.tick,updated_block=EXCLUDED.updated_block,updated_at=NOW()`, [address, price, inverse, pair.token0, pair.token1, sqrtPriceX96.toString(), liquidity.toString(), tick, block]);
+        await client.query(`INSERT INTO latest_prices (pool_address,price,inverse_price,price_change,price_change_percent,price_change_direction,fdv_usd,token_price_usd,total_supply,supply_basis,base_reserve,quote_reserve,updated_slot,updated_at) VALUES ($1,$2,$3,NULL,NULL,NULL,NULL,$4,NULL,'uniswap_v3_bsc',0,0,$5,NOW()) ON CONFLICT (pool_address) DO UPDATE SET price=EXCLUDED.price,inverse_price=EXCLUDED.inverse_price,token_price_usd=EXCLUDED.token_price_usd,price_change=EXCLUDED.price-latest_prices.price,price_change_percent=CASE WHEN latest_prices.price IS NULL OR latest_prices.price=0 THEN NULL ELSE ((EXCLUDED.price-latest_prices.price)/latest_prices.price)*100 END,price_change_direction=CASE WHEN latest_prices.price IS NULL THEN NULL WHEN EXCLUDED.price>latest_prices.price THEN 'up' WHEN EXCLUDED.price<latest_prices.price THEN 'down' ELSE 'flat' END,updated_slot=EXCLUDED.updated_slot,updated_at=EXCLUDED.updated_at`, [address, price, inverse, usd, now]);
+        await client.query(`INSERT INTO evm_price_history (pool_address,price,inverse_price,updated_block,updated_at) VALUES ($1,$2,$3,$4,NOW())`, [address, price, inverse, block]); for (const timeframe of TIMEFRAMES) { const bucket = Math.floor(now / timeframe.milliseconds) * timeframe.milliseconds; await client.query(`INSERT INTO price_candles (pool_address,timeframe,bucket_start,open,high,low,close,volume,updated_at) VALUES ($1,$2,$3,$4,$4,$4,$4,NULL,NOW()) ON CONFLICT (pool_address,timeframe,bucket_start) DO UPDATE SET high=GREATEST(price_candles.high,EXCLUDED.high),low=LEAST(price_candles.low,EXCLUDED.low),close=EXCLUDED.close,updated_at=EXCLUDED.updated_at`, [address, timeframe.name, bucket, price]); }
+        await client.query(`UPDATE latest_prices AS latest SET high_24h=rolling.high,low_24h=rolling.low FROM (SELECT MAX(high) AS high,MIN(low) AS low FROM price_candles WHERE pool_address=$1 AND timeframe='1m' AND bucket_start >= $2) AS rolling WHERE latest.pool_address=$1`, [address, now - 24 * 60 * 60 * 1000]); await client.query('COMMIT');
+      } catch (error) { await client.query('ROLLBACK').catch(() => undefined); throw error; } finally { client.release(); }
+      console.log(`[uniswap-v3-bsc][price] ${pair.symbol0}/${pair.symbol1}=${price} block=${block}`);
+    } catch (error) { console.error(`[uniswap-v3-bsc] price database write failed for ${address}:`, error); await failure(address, error); }
+    if (promoted.has(address) || activity.events.length < SWAP_THRESHOLD || wallets < UNIQUE_WALLET_THRESHOLD) return; promoted.add(address);
+    try { await pgPool.query(`INSERT INTO bsc_uniswap_v3_pools (address,pool_type,chain,factory,token0,token0_symbol,token0_decimals,token1,token1_symbol,token1_decimals,fee,tick_spacing,transaction_hash,block_number,discovered_at,indexed_at) VALUES ($1,'uniswap_v3','bsc',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW(),NOW()) ON CONFLICT (address) DO UPDATE SET token0=EXCLUDED.token0,token0_symbol=EXCLUDED.token0_symbol,token0_decimals=EXCLUDED.token0_decimals,token1=EXCLUDED.token1,token1_symbol=EXCLUDED.token1_symbol,token1_decimals=EXCLUDED.token1_decimals,fee=EXCLUDED.fee,tick_spacing=EXCLUDED.tick_spacing,block_number=EXCLUDED.block_number,indexed_at=NOW()`, [address, UNISWAP_V3_BSC_FACTORY, pair.token0, pair.symbol0, pair.decimals0, pair.token1, pair.symbol1, pair.decimals1, pair.fee, pair.tickSpacing, log.transactionHash ?? '', block]); console.log(`[uniswap-v3-bsc] Promoted ${address} ${pair.symbol0}/${pair.symbol1} | swaps=${activity.events.length} | wallets=${wallets}`); } catch (error) { promoted.delete(address); await failure(address, error); }
+  };
+  const subscribePool = (address: string) => { const pool = address.toLowerCase(); if (!/^0x[0-9a-f]{40}$/.test(pool) || subscribedPools.has(pool)) return; subscribedPools.add(pool); void rpc('eth_subscribe', ['logs', { address: pool, topics: [SWAP_TOPIC] }]).then((id) => console.log(`[uniswap-v3-bsc] Swap subscription active pool=${pool} id=${id}`)).catch((error) => { subscribedPools.delete(pool); console.error(`[uniswap-v3-bsc] pool subscription failed for ${pool}:`, error); }); };
+  const connect = () => { const endpoint = endpoints[endpointIndex]; socket = new WebSocket(endpoint); socket.on('open', () => { reconnectDelay = 1000; subscribedPools.clear(); console.log(`[uniswap-v3-bsc] websocket connected on ${endpoint}; factory=${UNISWAP_V3_BSC_FACTORY}; swap-only monitoring`); for (const pool of knownPools) subscribePool(pool); }); socket.on('message', (raw) => { try { const payload = JSON.parse(raw.toString()); if (payload.id !== undefined && pending.has(Number(payload.id))) { const request = pending.get(Number(payload.id))!; pending.delete(Number(payload.id)); payload.error ? request.reject(new Error(JSON.stringify(payload.error))) : request.resolve(payload.result); return; } if (payload.method !== 'eth_subscription' || !payload.params?.result) return; const result = payload.params.result; if (result.topics?.[0]?.toLowerCase() === SWAP_TOPIC) void processLog(result).catch((error) => void failure(String(result.address ?? ''), error)); } catch (error) { console.error('[uniswap-v3-bsc] message error:', error); } }); socket.on('error', (error) => console.error('[uniswap-v3-bsc] websocket error:', error)); socket.on('close', () => { subscribedPools.clear(); const next = nextWebsocketEndpoint(endpoints, endpointIndex); endpointIndex = next.index; if (!reconnectTimer) { reconnectTimer = setTimeout(() => { reconnectTimer = undefined; connect(); }, reconnectDelay); reconnectDelay = Math.min(reconnectDelay * 2, 30_000); } }); };
+  const refreshBnb = async () => { try { bnbUsd = await getReferencePrice('bnb'); } catch (error) { console.warn('[uniswap-v3-bsc] WBNB/USD refresh failed:', error); } };
+  try { const existing = await pgPool.query<{ address: string }>('SELECT address FROM bsc_uniswap_v3_pools'); for (const row of existing.rows) knownPools.add(row.address.toLowerCase()); } catch (error) { console.warn('[uniswap-v3-bsc] existing pool hydration failed:', error); }
+  await refreshBnb(); setInterval(() => void refreshBnb(), 180_000); connect();
+}
