@@ -601,7 +601,7 @@ async function main() {
   console.log('Fresh indexer session: in-memory swap counts reset.');
   const sameEndpointSet = (a: string[], b: string[]) => a.length === b.length && a.every((value, index) => value === b[index]);
   if (!sameEndpointSet(METEORA_DLMM_PRICE_WS_URL, METEORA_DLMM_BLOCK_WS_URL) || !sameEndpointSet(METEORA_DAMM_V2_PRICE_WS_URL, METEORA_DAMM_V2_BLOCK_WS_URL) || !sameEndpointSet(ORCA_WHIRLPOOL_PRICE_WS_URL, ORCA_WHIRLPOOL_BLOCK_WS_URL)) {
-    console.warn('Solana Meteora/Orca price endpoints are configured separately, but those indexers currently multiplex blockSubscribe and accountSubscribe on one socket; price endpoints remain reserved until dual-socket mode is enabled.');
+    console.log('Solana Meteora/Orca use separate block and price WebSockets; accountSubscribe traffic is sent through the configured price endpoints.');
   }
   await startUnifiedPriceEventMirror();
 
