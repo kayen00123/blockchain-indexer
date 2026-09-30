@@ -28,6 +28,7 @@ import { startUniswapV4BscIndexer } from './uniswap_v4_bsc_indexer.js';
 import { nextWebsocketEndpoint, readWebsocketEndpoints } from './evm_ws_rotation.js';
 import { startUnifiedPriceEventMirror } from './unified_price_events.js';
 import { fetchJson } from './http_json.js';
+import { runTokenLogoWorker } from './token_logo_worker.js';
 
 type SolanaAccountKey = { toBase58?: () => string; pubkey?: string } | string;
 type SolanaTxLike = {
@@ -638,6 +639,10 @@ async function main() {
     startUniswapV2BaseIndexer(pgPool, UNISWAP_V2_BASE_WS_URL),
     startUniswapV4BscIndexer(pgPool, UNISWAP_V4_BSC_WS_URL),
   ]);
+
+  void runTokenLogoWorker(false, pgPool).catch((error) => {
+    console.error('[indexer] token logo worker stopped unexpectedly:', error);
+  });
 
   setInterval(() => {
     const candidates = tracker.listCandidates();

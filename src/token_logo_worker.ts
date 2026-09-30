@@ -47,6 +47,8 @@ const sources: Source[] = [
   { table: 'base_uniswap_v3_pools', network: 'base', tokenColumn: 'token1', logoColumn: 'token1_logo_url' },
   { table: 'base_uniswap_v4_pools', network: 'base', tokenColumn: 'currency0', logoColumn: 'currency0_logo_url' },
   { table: 'base_uniswap_v4_pools', network: 'base', tokenColumn: 'currency1', logoColumn: 'currency1_logo_url' },
+  { table: 'aerodrome_slipstream_pools', network: 'base', tokenColumn: 'token0', logoColumn: 'token0_logo_url' },
+  { table: 'aerodrome_slipstream_pools', network: 'base', tokenColumn: 'token1', logoColumn: 'token1_logo_url' },
   { table: 'robinhood_uniswap_v2_pools', network: 'robinhood', tokenColumn: 'token0', logoColumn: 'token0_logo_url' },
   { table: 'robinhood_uniswap_v2_pools', network: 'robinhood', tokenColumn: 'token1', logoColumn: 'token1_logo_url' },
   { table: 'robinhood_uniswap_v3_pools', network: 'robinhood', tokenColumn: 'token0', logoColumn: 'token0_logo_url' },
@@ -126,43 +128,48 @@ async function updateLogo(pg: Pool, source: Source, address: string, logo: Logo)
   return result.rowCount ?? 0;
 }
 
-export async function runTokenLogoWorker(once = false): Promise<void> {
-  const pg = new Pool({ connectionString: postgresUrl, connectionTimeoutMillis: 10000, statement_timeout: 15000 });
+export async function runTokenLogoWorker(once = false, sharedPool?: Pool): Promise<void> {
+  const ownsPool = !sharedPool;
+  const pg = sharedPool ?? new Pool({ connectionString: postgresUrl, connectionTimeoutMillis: 10000, statement_timeout: 15000 });
   try {
     console.log(`[token-logo-worker] database=${postgresUrl.replace(/:\/\/[^@]+@/, '://***@')}`);
-    await ensureLogoColumns(pg);
     do {
       const cycleStarted = Date.now();
       let cycleProcessed = 0;
       let cycleUpdated = 0;
       let cycleFailed = 0;
-      while (true) {
-        const pending = await pendingTokens(pg);
-        const entries = [...pending.entries()].slice(0, batchSize);
-        if (entries.length === 0) break;
-        console.log(`[token-logo-worker] pending tokens=${pending.size}; processing=${entries.length}`);
-        for (let index = 0; index < entries.length; index += concurrency) {
-          await Promise.all(entries.slice(index, index + concurrency).map(async ([key, value]) => {
-            const address = key.slice(`${value.network}:`.length);
-            try {
-              const logo = await fetchLogo(value.network, address);
-              if (logo) {
-                let updatedRows = 0;
-                for (const source of value.sources) updatedRows += await updateLogo(pg, source, address, logo);
-                if (updatedRows > 0) cycleUpdated += 1;
-                else { await recordAttempt(pg, value.network, address, 'Logo found but no database row was updated'); cycleFailed += 1; }
-              } else {
-                await recordAttempt(pg, value.network, address, 'No logo returned by DexScreener or GeckoTerminal');
+      try {
+        await ensureLogoColumns(pg);
+        while (true) {
+          const pending = await pendingTokens(pg);
+          const entries = [...pending.entries()].slice(0, batchSize);
+          if (entries.length === 0) break;
+          console.log(`[token-logo-worker] pending tokens=${pending.size}; processing=${entries.length}`);
+          for (let index = 0; index < entries.length; index += concurrency) {
+            await Promise.all(entries.slice(index, index + concurrency).map(async ([key, value]) => {
+              const address = key.slice(`${value.network}:`.length);
+              try {
+                const logo = await fetchLogo(value.network, address);
+                if (logo) {
+                  let updatedRows = 0;
+                  for (const source of value.sources) updatedRows += await updateLogo(pg, source, address, logo);
+                  if (updatedRows > 0) cycleUpdated += 1;
+                  else { await recordAttempt(pg, value.network, address, 'Logo found but no database row was updated'); cycleFailed += 1; }
+                } else {
+                  await recordAttempt(pg, value.network, address, 'No logo returned by DexScreener or GeckoTerminal');
+                  cycleFailed += 1;
+                }
+              } catch (error) {
+                await recordAttempt(pg, value.network, address, error);
                 cycleFailed += 1;
-              }
-            } catch (error) {
-              await recordAttempt(pg, value.network, address, error);
-              cycleFailed += 1;
-            } finally { cycleProcessed += 1; }
-          }));
-          await sleep(delayMs);
+              } finally { cycleProcessed += 1; }
+            }));
+            await sleep(delayMs);
+          }
         }
-        console.log(`[token-logo-worker] batch complete: processed=${cycleProcessed} updated=${cycleUpdated} failed=${cycleFailed}`);
+      } catch (error) {
+        console.error('[token-logo-worker] scan cycle failed:', error);
+        if (once) throw error;
       }
       const elapsed = ((Date.now() - cycleStarted) / 1000).toFixed(1);
       console.log(`[token-logo-worker] cycle complete: processed=${cycleProcessed} updated=${cycleUpdated} failed=${cycleFailed} duration=${elapsed}s`);
@@ -171,7 +178,7 @@ export async function runTokenLogoWorker(once = false): Promise<void> {
         await sleep(intervalMs);
       }
     } while (!once);
-  } finally { await pg.end(); }
+  } finally { if (ownsPool) await pg.end(); }
 }
 
 if (process.argv[1]?.endsWith('token_logo_worker.ts') || process.argv[1]?.endsWith('token_logo_worker.js')) {
