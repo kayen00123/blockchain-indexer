@@ -166,7 +166,9 @@ export async function startPancakeSwapInfinityIndexer(pgPool: PgPool, websocketU
     const tick = signedWord(log.data, 4, 256);
     const fee = decodeUint(`0x${log.data.slice(2 + 5 * 64, 2 + 6 * 64)}`);
     const price = priceFromSqrt(sqrtPriceX96, pool.decimals0, pool.decimals1);
-    if (mode !== 'pools' && Number.isFinite(price) && price > 0) {
+
+    // Only write price if promoted or in price-only mode
+    if (mode !== 'pools' && Number.isFinite(price) && price > 0 && (mode === 'prices' || promoted.has(id))) {
       const inverse = 1 / price;
       const usd = tokenPriceUsd(pool, price, bnbUsd);
       await record({ type: 'price', poolType: 'pancakeswap_infinity_cl', poolId: id, poolAddress: id, manager: PANCAKESWAP_INFINITY_CL_POOL_MANAGER, pair: `${pool.symbol0}/${pool.symbol1}`, price, inversePrice: inverse, tokenPriceUsd: usd, sqrtPriceX96: sqrtPriceX96.toString(), liquidity: liquidity.toString(), tick, fee, block });
@@ -205,8 +207,14 @@ export async function startPancakeSwapInfinityIndexer(pgPool: PgPool, websocketU
   const connect = () => {
     const endpoint = endpoints[endpointIndex];
     socket = new WebSocket(endpoint);
-    socket.on('open', () => { reconnectDelay = 1000; console.log(`[pancakeswap-infinity] websocket connected on ${endpoint}; manager=${PANCAKESWAP_INFINITY_CL_POOL_MANAGER}`); void rpc('eth_subscribe', ['logs', { address: PANCAKESWAP_INFINITY_CL_POOL_MANAGER, topics: [SWAP_TOPIC] }]).then((id) => console.log(`[pancakeswap-infinity] Swap subscription active (id=${id}).`)); });
-    socket.on('message', (raw) => { try { const payload = JSON.parse(raw.toString()); if (payload.id !== undefined && pending.has(Number(payload.id))) { const request = pending.get(Number(payload.id))!; pending.delete(Number(payload.id)); payload.error ? request.reject(new Error(JSON.stringify(payload.error))) : request.resolve(payload.result); return; } if (payload.method === 'eth_subscription' && payload.params?.result) void process(payload.params.result).catch((error) => void failure(String(payload.params.result.topics?.[1] ?? ''), error)); } catch (error) { console.error('[pancakeswap-infinity] message error:', error); } });
+    socket.on('open', () => {
+      reconnectDelay = 1000;
+      console.log(`[pancakeswap-infinity] websocket connected on ${endpoint}; manager=${PANCAKESWAP_INFINITY_CL_POOL_MANAGER}`);
+      void rpc('eth_subscribe', ['logs', { address: PANCAKESWAP_INFINITY_CL_POOL_MANAGER, topics: [SWAP_TOPIC] }])
+        .then((id) => console.log(`[pancakeswap-infinity] Swap subscription active (id=${id}).`))
+        .catch((error) => console.error('[pancakeswap-infinity] swap subscription failed:', error));
+    });
+    socket.on('message', (raw) => { try { const payload = JSON.parse(raw.toString()); if (payload.id !== undefined && pending.has(Number(payload.id))) { const request = pending.get(Number(payload.id))!; pending.delete(Number(payload.id)); if (payload.error) { const error = new Error(JSON.stringify(payload.error)); console.error('[pancakeswap-infinity] RPC call failed:', error.message); request.reject(error); return; } request.resolve(payload.result); return; } if (payload.method === 'eth_subscription' && payload.params?.result) void process(payload.params.result).catch((error) => void failure(String(payload.params.result.topics?.[1] ?? ''), error)); } catch (error) { console.error('[pancakeswap-infinity] message error:', error); } });
     socket.on('error', (error) => console.error('[pancakeswap-infinity] websocket error:', error));
     socket.on('close', () => { const next = nextWebsocketEndpoint(endpoints, endpointIndex); endpointIndex = next.index; if (!reconnectTimer) { reconnectTimer = setTimeout(() => { reconnectTimer = undefined; connect(); }, reconnectDelay); reconnectDelay = Math.min(reconnectDelay * 2, 30_000); } });
   };

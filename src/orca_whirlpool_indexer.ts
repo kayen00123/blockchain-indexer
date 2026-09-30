@@ -314,7 +314,7 @@ export async function startOrcaWhirlpoolIndexer(pgPool: PgPool, websocketUrl: We
     socket = new WebSocket(endpoint);
     socket.on('open', () => {
       reconnectDelay = 1000;
-      socket?.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'blockSubscribe', params: [{ mentionsAccountOrProgram: ORCA_WHIRLPOOL_PROGRAM_ID }, { commitment: 'confirmed', encoding: 'jsonParsed', transactionDetails: 'full', maxSupportedTransactionVersion: 0 }] }));
+      socket?.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'blockSubscribe', params: [{ mentionsAccountOrProgram: ORCA_WHIRLPOOL_PROGRAM_ID }, { commitment: 'confirmed', encoding: 'jsonParsed', transactionDetails: 'full', maxSupportedTransactionVersion: 2 }] }));
       console.log('[orca-whirlpool] block subscription started.');
     });
     socket.on('message', (raw) => {

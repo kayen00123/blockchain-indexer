@@ -123,7 +123,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY || SUPABAS
     autoRefreshToken: false,
   },
 });
-const pgPool = new Pool({ connectionString: POSTGRES_URL, connectionTimeoutMillis: 10000, statement_timeout: 15000, idleTimeoutMillis: 30000, max: Number(process.env.POSTGRES_POOL_MAX ?? 20) });
+const pgPool = new Pool({ connectionString: POSTGRES_URL, connectionTimeoutMillis: 10000, idleTimeoutMillis: 30000, max: Number(process.env.POSTGRES_POOL_MAX ?? 20) });
 
 function consoleBanner() {
   console.log('=== PumpSwap Trending Indexer (MVP) ===');
@@ -515,7 +515,7 @@ async function subscribeToPumpSwap() {
             commitment: 'confirmed',
             encoding: 'jsonParsed',
             transactionDetails: 'full',
-            maxSupportedTransactionVersion: 0,
+            maxSupportedTransactionVersion: 2,
           },
         ],
       });

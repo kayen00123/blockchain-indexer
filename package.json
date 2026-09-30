@@ -33,6 +33,7 @@
     "pg": "^8.23.0"
   },
   "devDependencies": {
+    "@flydotio/dockerfile": "^0.7.10",
     "@types/node": "^22.7.4",
     "@types/ws": "^8.18.1",
     "keccak": "^3.0.4",

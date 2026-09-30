@@ -175,7 +175,7 @@ export async function startRaydiumClmmIndexer(pgPool: PgPool, websocketUrl: Webs
       reconnectDelayMs = 1000;
       socket?.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'blockSubscribe', params: [
         { mentionsAccountOrProgram: RAYDIUM_CLMM_PROGRAM_ID },
-        { commitment: 'confirmed', encoding: 'jsonParsed', transactionDetails: 'full', maxSupportedTransactionVersion: 0 },
+        { commitment: 'confirmed', encoding: 'jsonParsed', transactionDetails: 'full', maxSupportedTransactionVersion: 2 },
       ] }));
       console.log('[raydium-clmm] block subscription started.');
     });

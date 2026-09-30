@@ -321,6 +321,8 @@ export async function startPancakeSwapV3Indexer(pgPool: PgPool, websocketUrl: st
         console.log(`[pancakeswap-v3][websocket] Swap event received pool=${pairAddress} block=${block}`);
         void processLog(result, block, 'websocket').then(async (pair) => {
           if (!pair) return;
+          // Only fetch prices for promoted/registered pools
+          if (!pairs.has(pair.address)) return;
           try {
             const sqrtPriceX96 = word(result.data, 2);
             await price(pair, sqrtPriceX96, block);

@@ -130,7 +130,7 @@ async function updateLogo(pg: Pool, source: Source, address: string, logo: Logo)
 
 export async function runTokenLogoWorker(once = false, sharedPool?: Pool): Promise<void> {
   const ownsPool = !sharedPool;
-  const pg = sharedPool ?? new Pool({ connectionString: postgresUrl, connectionTimeoutMillis: 10000, statement_timeout: 15000 });
+  const pg = sharedPool ?? new Pool({ connectionString: postgresUrl, connectionTimeoutMillis: 10000 });
   try {
     console.log(`[token-logo-worker] database=${postgresUrl.replace(/:\/\/[^@]+@/, '://***@')}`);
     do {
