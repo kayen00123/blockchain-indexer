@@ -154,6 +154,21 @@ export async function startRaydiumPriceFetcher(pgPool: PgPool, websocketUrl: Web
           price_change = EXCLUDED.price - latest_prices.price,
           price_change_percent = CASE WHEN latest_prices.price IS NULL OR latest_prices.price = 0 THEN NULL ELSE ((EXCLUDED.price - latest_prices.price) / latest_prices.price) * 100 END,
           price_change_direction = CASE WHEN latest_prices.price IS NULL THEN NULL WHEN EXCLUDED.price > latest_prices.price THEN 'up' WHEN EXCLUDED.price < latest_prices.price THEN 'down' ELSE 'flat' END,
+          price_change_24h = (
+            SELECT CASE
+              WHEN ref.open IS NULL OR ref.open = 0 THEN NULL
+              ELSE ((EXCLUDED.price - ref.open) / ref.open) * 100
+            END
+            FROM (
+              SELECT open
+              FROM price_candles
+              WHERE pool_address = EXCLUDED.pool_address
+                AND timeframe = '1h'
+                AND bucket_start >= EXTRACT(EPOCH FROM (NOW() - INTERVAL '25 hours')) * 1000
+              ORDER BY bucket_start ASC
+              LIMIT 1
+            ) ref
+          ),
           base_reserve = EXCLUDED.base_reserve,
           quote_reserve = EXCLUDED.quote_reserve,
           updated_slot = EXCLUDED.updated_slot,

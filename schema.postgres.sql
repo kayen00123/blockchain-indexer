@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS latest_prices (
 );
 ALTER TABLE latest_prices ADD COLUMN IF NOT EXISTS high_24h DOUBLE PRECISION;
 ALTER TABLE latest_prices ADD COLUMN IF NOT EXISTS low_24h DOUBLE PRECISION;
+ALTER TABLE latest_prices ADD COLUMN IF NOT EXISTS price_change_24h NUMERIC;
 
 CREATE TABLE IF NOT EXISTS price_candles (
   pool_address TEXT NOT NULL,
@@ -488,3 +489,6 @@ CREATE TABLE IF NOT EXISTS robinhood_uniswap_v4_prices (
 );
 
 COMMIT;
+
+-- Migration: Add price_change_24h column for industry-standard 24-hour price change
+-- ALTER TABLE latest_prices ADD COLUMN IF NOT EXISTS price_change_24h NUMERIC;
